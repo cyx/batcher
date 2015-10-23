@@ -10,15 +10,14 @@ b := batcher.New(1500, time.Second * 5)
 defer b.Close()
 
 o := struct{}{}
-// Push any kind of interface in
-b.Push(o)
+// Queue any kind of interface in
+b.Queue(o)
 
-go func() {
-	for _, batch := range b.Next() {
-		for _, elem := range batch {
-			// elem is an interface which you should
-			// be able to cast to the concrete type you want.
-		}
+// Register a generic trigger function for when
+// the queue either fills up, or the interval ticks.
+go b.Trigger(func(payload chan interface{}) {
+	for _, elem := range payload {
+		// Do something with the payload.
 	}
-}
+})
 ```
