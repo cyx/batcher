@@ -93,6 +93,7 @@ func (b *batcher) Trigger(fn func(chan interface{})) {
 		case <-b.closer:
 			// Flush any other bits we might still have.
 			fn(b.list)
+			return
 		}
 	}
 }
