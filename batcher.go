@@ -61,6 +61,7 @@ func (b *batcher) unbatch() chan interface{} {
 
 	// Copy the channel
 	payload := b.list
+	close(payload)
 
 	// Re-initialize the list with an empty channel.
 	b.list = make(chan interface{}, b.count)

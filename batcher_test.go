@@ -20,9 +20,15 @@ func TestQueueTriggerBasics(t *testing.T) {
 	b := New(5, time.Second*1500)
 
 	// Use channels to signal completion
-	done := make(chan chan interface{})
+	done := make(chan int)
 	go b.Trigger(func(payload chan interface{}) {
-		done <- payload
+		// We do a range'd loop to verify that the channel
+		// has been closed and therefore won't block on us.
+		t := 0 // total
+		for range payload {
+			t++
+		}
+		done <- t
 	})
 
 	// Make 5x+1 pushes to trigger a batch.
@@ -34,9 +40,9 @@ func TestQueueTriggerBasics(t *testing.T) {
 	}
 
 	select {
-	case payload := <-done:
-		if len(payload) != 5 {
-			t.Fatalf("Payload len expected to be 5, got %d", len(payload))
+	case total := <-done:
+		if total != 5 {
+			t.Fatalf("Payload len expected to be 5, got %d", total)
 		}
 
 	case <-time.After(time.Second * 1):
