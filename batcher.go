@@ -48,11 +48,18 @@ func (b *batcher) Queue(elem interface{}) error {
 	if len(b.list) >= b.count {
 		b.queue <- b.unbatch()
 	}
-	b.list <- elem
+	b.safeQueue(elem)
 
 	// No known errors to return at this time, but we
 	// should reserve the right to have one for posterity.
 	return nil
+}
+
+func (b *batcher) safeQueue(elem interface{}) {
+	b.Mutex.Lock()
+	defer b.Mutex.Unlock()
+
+	b.list <- elem
 }
 
 func (b *batcher) unbatch() chan interface{} {
