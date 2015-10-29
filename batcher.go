@@ -29,7 +29,6 @@ func New(count int, interval time.Duration) Batcher {
 		count:    count,
 		interval: interval,
 		list:     make(chan interface{}, count),
-		queue:    make(chan chan interface{}, QueueSize),
 		closer:   make(chan struct{}),
 	}
 }
@@ -40,7 +39,6 @@ type batcher struct {
 	count    int
 	interval time.Duration
 	list     chan interface{}
-	queue    chan chan interface{}
 	closer   chan struct{}
 }
 
@@ -69,7 +67,7 @@ func (b *batcher) Trigger(fn func(chan interface{})) {
 		case <-time.After(b.interval):
 			// Flush if we have anything, otherwise, we
 			// start all over again with the timer reset.
-			if len(buff) >= 0 {
+			if len(buff) > 0 {
 				close(buff)
 				fn(buff)
 				buff = make(chan interface{}, b.count)
