@@ -74,7 +74,13 @@ func (b *batcher) Trigger(fn func(chan interface{})) {
 			}
 
 		case <-b.closer:
+			// Ensure range terminates
+			close(b.list)
+
 			// Flush any other bits we might still have.
+			for elem := range b.list {
+				buff <- elem
+			}
 			fn(buff)
 			return
 		}
