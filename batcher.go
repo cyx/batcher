@@ -45,54 +45,39 @@ type batcher struct {
 }
 
 func (b *batcher) Queue(elem interface{}) error {
-	if len(b.list) >= b.count {
-		b.queue <- b.unbatch()
-	}
-	b.safeQueue(elem)
+	b.list <- elem
 
 	// No known errors to return at this time, but we
 	// should reserve the right to have one for posterity.
 	return nil
 }
 
-func (b *batcher) safeQueue(elem interface{}) {
-	b.Mutex.Lock()
-	defer b.Mutex.Unlock()
-
-	b.list <- elem
-}
-
-func (b *batcher) unbatch() chan interface{} {
-	b.Mutex.Lock()
-	defer b.Mutex.Unlock()
-
-	// Copy the channel
-	payload := b.list
-	close(payload)
-
-	// Re-initialize the list with an empty channel.
-	b.list = make(chan interface{}, b.count)
-
-	return payload
-}
-
 func (b *batcher) Trigger(fn func(chan interface{})) {
+	buff := make(chan interface{}, b.count)
 	for {
 		select {
-		case payload := <-b.queue:
+		case item := <-b.list:
 			// Happy path.
-			fn(payload)
+			select {
+			case buff <- item:
+			default:
+				close(buff)
+				fn(buff)
+				buff = make(chan interface{}, b.count)
+			}
 
 		case <-time.After(b.interval):
 			// Flush if we have anything, otherwise, we
 			// start all over again with the timer reset.
-			if len(b.list) >= 0 {
-				fn(b.unbatch())
+			if len(buff) >= 0 {
+				close(buff)
+				fn(buff)
+				buff = make(chan interface{}, b.count)
 			}
 
 		case <-b.closer:
 			// Flush any other bits we might still have.
-			fn(b.list)
+			fn(buff)
 			return
 		}
 	}
