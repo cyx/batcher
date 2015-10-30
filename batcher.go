@@ -24,10 +24,12 @@ type Batcher interface {
 }
 
 // New gives you a initialized Batcher with batcher.QueueSize
-// being the only pre-configured default. You can change that default
-// by doing:
+// and Workers being the pre configured defaults.
+//
+// You can change the defaults by doing:
 //
 //         batcher.QueueSize = N
+//         batcher.Workers = M
 func New(count int, interval time.Duration) Batcher {
 	return &batcher{
 		count:    count,
@@ -40,7 +42,7 @@ func New(count int, interval time.Duration) Batcher {
 }
 
 type batcher struct {
-	sync.WaitGroup
+	wg sync.WaitGroup
 	sync.Mutex
 
 	count    int
@@ -68,10 +70,10 @@ func (b *batcher) spawn(fn func(chan interface{})) {
 func (b *batcher) startWorkers(fn func(chan interface{})) {
 	for i := b.workers; i > 0; i-- {
 		// Signal start of worker
-		b.Add(1)
+		b.wg.Add(1)
 		go func() {
 			// Signal completion of worker
-			defer b.Done()
+			defer b.wg.Done()
 			b.spawn(fn)
 		}()
 	}
@@ -85,22 +87,13 @@ func (b *batcher) Trigger(fn func(chan interface{})) {
 		select {
 		case item := <-b.list:
 			// Happy path.
-			select {
-			case buff <- item:
-			default:
-				close(buff)
-				b.outbox <- buff
-				buff = make(chan interface{}, b.count)
-				buff <- item
-			}
+			b.bufferMaybeBatch(&buff, item)
 
 		case <-time.After(b.interval):
 			// Flush if we have anything, otherwise, we
 			// start all over again with the timer reset.
 			if len(buff) > 0 {
-				close(buff)
-				b.outbox <- buff
-				buff = make(chan interface{}, b.count)
+				b.batch(&buff)
 			}
 
 		case <-b.closer:
@@ -108,18 +101,10 @@ func (b *batcher) Trigger(fn func(chan interface{})) {
 			close(b.list)
 
 			// Flush any other bits we might still have.
-			for elem := range b.list {
-				select {
-				case buff <- elem:
-				default:
-					close(buff)
-					b.outbox <- buff
-					buff = make(chan interface{}, b.count)
-					buff <- elem
-				}
+			for item := range b.list {
+				b.bufferMaybeBatch(&buff, item)
 			}
-			close(buff)
-			b.outbox <- buff
+			b.batch(&buff)
 			close(b.outbox)
 			return
 		}
@@ -130,5 +115,20 @@ func (b *batcher) Close() {
 	close(b.closer)
 
 	// Wait for all workers to finish.
-	b.Wait()
+	b.wg.Wait()
+}
+
+func (b *batcher) bufferMaybeBatch(buff *chan interface{}, item interface{}) {
+	select {
+	case *buff <- item:
+	default:
+		b.batch(buff)
+		*buff <- item
+	}
+}
+
+func (b *batcher) batch(buff *chan interface{}) {
+	close(*buff)
+	b.outbox <- *buff
+	*buff = make(chan interface{}, b.count)
 }
