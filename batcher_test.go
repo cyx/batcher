@@ -99,3 +99,41 @@ func TestQueueTriggerCloseFlush(t *testing.T) {
 		t.Fatal("Too long!")
 	}
 }
+
+func TestOverflowing(t *testing.T) {
+	QueueSize = 5
+
+	// We want the flush to be triggered by the buffer size.
+	b := New(1, time.Second*1500)
+	defer b.Close()
+
+	// Use channels to signal completion
+	done := make(chan bool, 100)
+	result := make(chan interface{}, QueueSize)
+
+	go b.Trigger(func(payload chan interface{}) {
+		for e := range payload {
+			select {
+			case result <- e:
+			default:
+				done <- true
+			}
+		}
+	})
+
+	// Queue 1 more to trigger the overflow
+	// Queue 1 additional more for result ch overflow
+	for i := 0; i < QueueSize+2; i++ {
+		// Queue a hypothetical concrete type
+		b.Queue(myConcreteType{Name: fmt.Sprintf("John %d", i)})
+	}
+
+	select {
+	case <-done:
+		if len(result) != QueueSize {
+			t.Fatalf("Expected result len to be %d but got %d", QueueSize, len(result))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Too slow")
+	}
+}

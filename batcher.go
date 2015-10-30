@@ -12,7 +12,11 @@ import (
 // handle is 150K pushes / second.
 var QueueSize = 100
 
-// Batcher gives you a generic concept of: Push, Trigger, Close.
+// Number of goroutines we should spawn that will actively do work
+// in serial.
+var Workers = 5
+
+// Batcher gives you a generic concept of: Queue, Trigger, Close.
 type Batcher interface {
 	Queue(elem interface{}) error
 	Trigger(func(chan interface{}))
@@ -30,16 +34,21 @@ func New(count int, interval time.Duration) Batcher {
 		interval: interval,
 		list:     make(chan interface{}, count),
 		closer:   make(chan struct{}),
+		outbox:   make(chan chan interface{}, QueueSize),
+		workers:  Workers,
 	}
 }
 
 type batcher struct {
+	sync.WaitGroup
 	sync.Mutex
 
 	count    int
 	interval time.Duration
 	list     chan interface{}
 	closer   chan struct{}
+	outbox   chan chan interface{}
+	workers  int
 }
 
 func (b *batcher) Queue(elem interface{}) error {
@@ -50,7 +59,27 @@ func (b *batcher) Queue(elem interface{}) error {
 	return nil
 }
 
+func (b *batcher) spawn(fn func(chan interface{})) {
+	for e := range b.outbox {
+		fn(e)
+	}
+}
+
+func (b *batcher) startWorkers(fn func(chan interface{})) {
+	for i := b.workers; i > 0; i-- {
+		// Signal start of worker
+		b.Add(1)
+		go func() {
+			// Signal completion of worker
+			defer b.Done()
+			b.spawn(fn)
+		}()
+	}
+}
+
 func (b *batcher) Trigger(fn func(chan interface{})) {
+	b.startWorkers(fn)
+
 	buff := make(chan interface{}, b.count)
 	for {
 		select {
@@ -60,8 +89,9 @@ func (b *batcher) Trigger(fn func(chan interface{})) {
 			case buff <- item:
 			default:
 				close(buff)
-				fn(buff)
+				b.outbox <- buff
 				buff = make(chan interface{}, b.count)
+				buff <- item
 			}
 
 		case <-time.After(b.interval):
@@ -69,7 +99,7 @@ func (b *batcher) Trigger(fn func(chan interface{})) {
 			// start all over again with the timer reset.
 			if len(buff) > 0 {
 				close(buff)
-				fn(buff)
+				b.outbox <- buff
 				buff = make(chan interface{}, b.count)
 			}
 
@@ -79,9 +109,18 @@ func (b *batcher) Trigger(fn func(chan interface{})) {
 
 			// Flush any other bits we might still have.
 			for elem := range b.list {
-				buff <- elem
+				select {
+				case buff <- elem:
+				default:
+					close(buff)
+					b.outbox <- buff
+					buff = make(chan interface{}, b.count)
+					buff <- elem
+				}
 			}
-			fn(buff)
+			close(buff)
+			b.outbox <- buff
+			close(b.outbox)
 			return
 		}
 	}
@@ -89,4 +128,7 @@ func (b *batcher) Trigger(fn func(chan interface{})) {
 
 func (b *batcher) Close() {
 	close(b.closer)
+
+	// Wait for all workers to finish.
+	b.Wait()
 }
