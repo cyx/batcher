@@ -170,3 +170,48 @@ func BenchmarkQueueWithNoop(b *testing.B) {
 	// Basically we should be getting the same values here.
 	fmt.Printf("Scheduled %d ops, Completed = %d\n", b.N, ops)
 }
+
+func BenchmarkQueueWithSlowOperation(b *testing.B) {
+	// Increase worker size to determine what mathemetical
+	// balance we need.
+	// Currently 10 is the minimum number of workes which
+	// doesn't drop an item for this setup meaning:
+	//
+	//    5 workers x 1500 elements taking 1ms each
+	//    => 7500 elements taking 1ms
+	//    => 2M elements / 7500 elems/1ms == 266.67 elem/ms throughput max
+	//
+	//    10 workers just means 133.33 elem/ms which is what satisifies
+	//    this bandwidth condition.
+	Workers = 10
+	defer func() {
+		Workers = 5
+	}()
+
+	b.StartTimer()
+
+	// Obscenely long timeout so it won't trigger at all.
+	batching := New(1500, time.Second*1500)
+
+	// Add up all the payload lengths that we get to verify
+	// that input <=> output counts are the same.
+	var ops uint64
+	go batching.Trigger(func(payload chan interface{}) {
+		time.Sleep(time.Millisecond)
+		atomic.AddUint64(&ops, uint64(len(payload)))
+	})
+
+	for i := 0; i < b.N; i++ {
+		// Queue as fast as possible, erroring out if we get even
+		// one single drop.
+		if err := batching.Queue(myConcreteType{Name: fmt.Sprintf("John %d", i)}); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.StopTimer()
+	batching.Close()
+
+	// Basically we should be getting the same values here.
+	fmt.Printf("Scheduled %d ops, Completed = %d\n", b.N, ops)
+}
