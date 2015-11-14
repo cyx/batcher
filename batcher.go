@@ -1,6 +1,7 @@
 package batcher
 
 import (
+	"errors"
 	"sync"
 	"time"
 )
@@ -8,13 +9,19 @@ import (
 // QueueSize is the size of the queue channel and should depend based
 // on the load volume that you expect.
 //
-// If N=1500 and QueueSize=100, that means the max bandwidth you can
-// handle is 150K pushes / second.
+// If N=1500 and QueueSize=100, that means you can only batch up to
+// 150,000 elements + the ListSize default of 1M (so 1.15M elements
+// all in all).
 var QueueSize = 100
 
 // Number of goroutines we should spawn that will actively do work
 // in serial.
 var Workers = 5
+
+// ListSize determines how much buffering you can get. If you push
+// 1M elements fast enough before you can discard any of that in
+// your workers, you'll start dropping messages.
+var ListSize = 1000000
 
 // Batcher gives you a generic concept of: Queue, Trigger, Close.
 type Batcher interface {
@@ -34,7 +41,7 @@ func New(count int, interval time.Duration) Batcher {
 	return &batcher{
 		count:    count,
 		interval: interval,
-		list:     make(chan interface{}, count),
+		list:     make(chan interface{}, ListSize),
 		closer:   make(chan struct{}),
 		outbox:   make(chan chan interface{}, QueueSize),
 		workers:  Workers,
@@ -43,7 +50,6 @@ func New(count int, interval time.Duration) Batcher {
 
 type batcher struct {
 	wg sync.WaitGroup
-	sync.Mutex
 
 	count    int
 	interval time.Duration
@@ -53,12 +59,15 @@ type batcher struct {
 	workers  int
 }
 
-func (b *batcher) Queue(elem interface{}) error {
-	b.list <- elem
+var errDropped = errors.New("batcher error: dropped queued item")
 
-	// No known errors to return at this time, but we
-	// should reserve the right to have one for posterity.
-	return nil
+func (b *batcher) Queue(elem interface{}) error {
+	select {
+	case b.list <- elem:
+		return nil
+	default:
+		return errDropped
+	}
 }
 
 func (b *batcher) spawn(fn func(chan interface{})) {

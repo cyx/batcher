@@ -2,6 +2,7 @@ package batcher
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -36,7 +37,9 @@ func TestQueueTriggerBasics(t *testing.T) {
 	// to push to a full queue.
 	for i := 0; i < 6; i++ {
 		// Queue a hypothetical concrete type
-		b.Queue(myConcreteType{Name: fmt.Sprintf("John %d", i)})
+		if err := b.Queue(myConcreteType{Name: fmt.Sprintf("John %d", i)}); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	select {
@@ -125,7 +128,9 @@ func TestOverflowing(t *testing.T) {
 	// Queue 1 additional more for result ch overflow
 	for i := 0; i < QueueSize+2; i++ {
 		// Queue a hypothetical concrete type
-		b.Queue(myConcreteType{Name: fmt.Sprintf("John %d", i)})
+		if err := b.Queue(myConcreteType{Name: fmt.Sprintf("John %d", i)}); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	select {
@@ -136,4 +141,32 @@ func TestOverflowing(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Too slow")
 	}
+}
+
+func BenchmarkQueueWithNoop(b *testing.B) {
+	b.StartTimer()
+
+	// Obscenely long timeout so it won't trigger at all.
+	batching := New(1500, time.Second*1500)
+
+	// Add up all the payload lengths that we get to verify
+	// that input <=> output counts are the same.
+	var ops uint64
+	go batching.Trigger(func(payload chan interface{}) {
+		atomic.AddUint64(&ops, uint64(len(payload)))
+	})
+
+	for i := 0; i < b.N; i++ {
+		// Queue as fast as possible, erroring out if we get even
+		// one single drop.
+		if err := batching.Queue(myConcreteType{Name: fmt.Sprintf("John %d", i)}); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.StopTimer()
+	batching.Close()
+
+	// Basically we should be getting the same values here.
+	fmt.Printf("Scheduled %d ops, Completed = %d\n", b.N, ops)
 }
