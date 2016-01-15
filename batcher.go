@@ -27,7 +27,7 @@ var ListSize = 1000000
 type Batcher interface {
 	Queue(elem interface{}) error
 	Trigger(func(chan interface{}))
-	Close()
+	Close() error
 }
 
 // New gives you a initialized Batcher with batcher.QueueSize
@@ -38,7 +38,7 @@ type Batcher interface {
 //         batcher.QueueSize = N
 //         batcher.Workers = M
 func New(count int, interval time.Duration) Batcher {
-	return &batcher{
+	b := &batcher{
 		count:    count,
 		interval: interval,
 		list:     make(chan interface{}, ListSize),
@@ -46,11 +46,12 @@ func New(count int, interval time.Duration) Batcher {
 		outbox:   make(chan chan interface{}, QueueSize),
 		workers:  Workers,
 	}
+	b.wg.Add(b.workers)
+	return b
 }
 
 type batcher struct {
-	wg sync.WaitGroup
-
+	wg       sync.WaitGroup
 	count    int
 	interval time.Duration
 	list     chan interface{}
@@ -78,10 +79,7 @@ func (b *batcher) spawn(fn func(chan interface{})) {
 
 func (b *batcher) startWorkers(fn func(chan interface{})) {
 	for i := b.workers; i > 0; i-- {
-		// Signal start of worker
-		b.wg.Add(1)
 		go func() {
-			// Signal completion of worker
 			defer b.wg.Done()
 			b.spawn(fn)
 		}()
@@ -114,17 +112,20 @@ func (b *batcher) Trigger(fn func(chan interface{})) {
 				b.bufferMaybeBatch(&buff, item)
 			}
 			b.batch(&buff)
+
+			// Make sure workers' ranges terminate
 			close(b.outbox)
 			return
 		}
 	}
 }
 
-func (b *batcher) Close() {
+func (b *batcher) Close() error {
 	close(b.closer)
 
 	// Wait for all workers to finish.
 	b.wg.Wait()
+	return nil
 }
 
 func (b *batcher) bufferMaybeBatch(buff *chan interface{}, item interface{}) {

@@ -19,9 +19,10 @@ func TestQueueTriggerBasics(t *testing.T) {
 	// Obscenely long time. We want the batch by number
 	// in this test.
 	b := New(5, time.Second*1500)
+	defer b.Close()
 
 	// Use channels to signal completion
-	done := make(chan int)
+	done := make(chan int, 2)
 	go b.Trigger(func(payload chan interface{}) {
 		// We do a range'd loop to verify that the channel
 		// has been closed and therefore won't block on us.
@@ -57,9 +58,10 @@ func TestQueueTriggerTimedFlush(t *testing.T) {
 	// We want enough time to get a batch,
 	// but fast enough that the test won't block long.
 	b := New(5, time.Millisecond*10)
+	defer b.Close()
 
 	// Use channels to signal completion
-	done := make(chan chan interface{})
+	done := make(chan chan interface{}, 2)
 	go b.Trigger(func(payload chan interface{}) {
 		done <- payload
 	})
@@ -83,7 +85,7 @@ func TestQueueTriggerCloseFlush(t *testing.T) {
 	b := New(5, time.Second*1500)
 
 	// Use channels to signal completion
-	done := make(chan chan interface{})
+	done := make(chan chan interface{}, 2)
 	go b.Trigger(func(payload chan interface{}) {
 		done <- payload
 	})
