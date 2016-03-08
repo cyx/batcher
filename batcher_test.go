@@ -105,6 +105,24 @@ func TestQueueTriggerCloseFlush(t *testing.T) {
 	}
 }
 
+func TestQueueAfterClosedDoesNotPanic(t *testing.T) {
+	// We want the flush to be triggered by `Close()`.
+	b := New(5, time.Second*1500)
+
+	// Use channels to signal completion
+	done := make(chan chan interface{}, 2)
+	go b.Trigger(func(payload chan interface{}) {
+		done <- payload
+	})
+
+	// Queue a single hypothetical concrete type
+	b.Queue(myConcreteType{Name: "John"})
+	b.Close()
+	if err := b.Queue(myConcreteType{Name: "John"}); err != errClosed {
+		t.Fatalf("Expected err to be errClosed, got %s", err)
+	}
+}
+
 func TestOverflowing(t *testing.T) {
 	QueueSize = 5
 

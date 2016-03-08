@@ -61,9 +61,12 @@ type batcher struct {
 }
 
 var errDropped = errors.New("batcher error: dropped queued item")
+var errClosed = errors.New("batcher error: already closed")
 
 func (b *batcher) Queue(elem interface{}) error {
 	select {
+	case <-b.closer:
+		return errClosed
 	case b.list <- elem:
 		return nil
 	default:
