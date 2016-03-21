@@ -6,28 +6,52 @@ import (
 	"time"
 )
 
-// QueueSize is the size of the queue channel and should depend based
-// on the load volume that you expect.
-//
-// If N=1500 and QueueSize=100, that means you can only batch up to
-// 150,000 elements + the ListSize default of 1M (so 1.15M elements
-// all in all).
-var QueueSize = 100
-
-// Number of goroutines we should spawn that will actively do work
-// in serial.
-var Workers = 5
-
-// ListSize determines how much buffering you can get. If you push
-// 1M elements fast enough before you can discard any of that in
-// your workers, you'll start dropping messages.
-var ListSize = 1000000
-
 // Batcher gives you a generic concept of: Queue, Trigger, Close.
 type Batcher interface {
 	Queue(elem interface{}) error
 	Trigger(func(chan interface{}))
 	Close() error
+}
+
+func defaultConfig() *config {
+	return &config{
+		OutboxSize: 64,
+		NumWorkers: 16,
+		QueueSize:  1024 * 1024,
+		Interval:   time.Second,
+	}
+}
+
+type config struct {
+	OutboxSize int
+	NumWorkers int
+	QueueSize  int
+	Interval   time.Duration
+}
+
+type Option interface {
+	Apply(*config)
+}
+type OptionFunc func(*config)
+
+func (f OptionFunc) Apply(c *config) {
+	f(c)
+}
+
+func OutboxSize(n int) Option {
+	return OptionFunc(func(c *config) { c.OutboxSize = n })
+}
+
+func NumWorkers(n int) Option {
+	return OptionFunc(func(c *config) { c.NumWorkers = n })
+}
+
+func QueueSize(n int) Option {
+	return OptionFunc(func(c *config) { c.QueueSize = n })
+}
+
+func Interval(n time.Duration) Option {
+	return OptionFunc(func(c *config) { c.Interval = n })
 }
 
 // New gives you a initialized Batcher with batcher.QueueSize
@@ -37,14 +61,19 @@ type Batcher interface {
 //
 //         batcher.QueueSize = N
 //         batcher.Workers = M
-func New(count int, interval time.Duration) Batcher {
+func New(count int, options ...Option) Batcher {
+	config := defaultConfig()
+	for _, o := range options {
+		o.Apply(config)
+	}
+
 	b := &batcher{
 		count:    count,
-		interval: interval,
-		list:     make(chan interface{}, ListSize),
+		interval: config.Interval,
+		list:     make(chan interface{}, config.QueueSize),
 		closer:   make(chan struct{}),
-		outbox:   make(chan chan interface{}, QueueSize),
-		workers:  Workers,
+		outbox:   make(chan chan interface{}, config.OutboxSize),
+		workers:  config.NumWorkers,
 	}
 	b.wg.Add(b.workers)
 	return b
@@ -107,12 +136,21 @@ func (b *batcher) Trigger(fn func(chan interface{})) {
 			}
 
 		case <-b.closer:
-			// Ensure range terminates
-			close(b.list)
+			// Nullify our b.list so pushes to it will block.
+			// This is better than closing it because race conditions
+			// might trigger panics.
+			list := b.list
+			b.list = nil
 
 			// Flush any other bits we might still have.
-			for item := range b.list {
-				b.bufferMaybeBatch(&buff, item)
+		LOOP:
+			for {
+				select {
+				case item := <-list:
+					b.bufferMaybeBatch(&buff, item)
+				default:
+					break LOOP
+				}
 			}
 			b.batch(&buff)
 
