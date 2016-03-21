@@ -2,9 +2,14 @@ package batcher
 
 import (
 	"errors"
+	"log"
 	"sync"
 	"time"
+
+	"github.com/apg/ln"
 )
+
+var Timeout = time.Millisecond * 10
 
 // QueueSize is the size of the queue channel and should depend based
 // on the load volume that you expect.
@@ -12,16 +17,16 @@ import (
 // If N=1500 and QueueSize=100, that means you can only batch up to
 // 150,000 elements + the ListSize default of 1M (so 1.15M elements
 // all in all).
-var QueueSize = 100
+var OutboxChannelSize = 128
 
 // Number of goroutines we should spawn that will actively do work
 // in serial.
-var Workers = 5
+var Workers = 64
 
 // ListSize determines how much buffering you can get. If you push
 // 1M elements fast enough before you can discard any of that in
 // your workers, you'll start dropping messages.
-var ListSize = 1000000
+// var ListSize = 1024 * 1024
 
 // Batcher gives you a generic concept of: Queue, Trigger, Close.
 type Batcher interface {
@@ -39,44 +44,91 @@ type Batcher interface {
 //         batcher.Workers = M
 func New(count int, interval time.Duration) Batcher {
 	b := &batcher{
-		count:    count,
-		interval: interval,
-		list:     make(chan interface{}, ListSize),
-		closer:   make(chan struct{}),
-		outbox:   make(chan chan interface{}, QueueSize),
-		workers:  Workers,
+		count:     count,
+		interval:  interval,
+		list:      make(chan interface{}, count),
+		closer:    make(chan struct{}),
+		outbox:    make(chan chan interface{}, OutboxChannelSize),
+		workers:   Workers,
+		flushTick: time.Tick(interval),
+		emitTick:  time.Tick(time.Second),
 	}
+	go b.flush()
 	b.wg.Add(b.workers)
 	return b
 }
 
 type batcher struct {
-	wg       sync.WaitGroup
-	count    int
-	interval time.Duration
-	list     chan interface{}
-	closer   chan struct{}
-	outbox   chan chan interface{}
-	workers  int
+	wg        sync.WaitGroup
+	count     int
+	interval  time.Duration
+	list      chan interface{}
+	closer    chan struct{}
+	outbox    chan chan interface{}
+	workers   int
+	flushTick <-chan time.Time
+	emitTick  <-chan time.Time
 }
 
 var errDropped = errors.New("batcher error: dropped queued item")
 var errClosed = errors.New("batcher error: already closed")
+
+func (b *batcher) flush() {
+	for {
+		select {
+		case <-b.emitTick:
+			ln.Info(ln.F{
+				"gauge#batcher.outbox.length": len(b.outbox),
+				"gauge#batcher.list.length":   len(b.list),
+			})
+
+		case <-b.flushTick:
+			buff := make(chan interface{}, b.count)
+		LOOP:
+			for {
+				select {
+				case e := <-b.list:
+					buff <- e
+
+				default:
+					break LOOP
+				}
+			}
+			select {
+			case b.outbox <- buff:
+			case <-b.closer:
+			}
+		case <-b.closer:
+			return
+		}
+	}
+}
 
 func (b *batcher) Queue(elem interface{}) error {
 	select {
 	case <-b.closer:
 		return errClosed
 	case b.list <- elem:
-		return nil
 	default:
-		return errDropped
+		close(b.list)
+		select {
+		case b.outbox <- b.list:
+			b.list = make(chan interface{}, b.count)
+			b.list <- elem
+		case <-b.closer:
+		case <-time.After(Timeout):
+			log.Printf("dropped")
+			ln.Error(ln.F{"count#batcher.outbox.drop": 1})
+		}
 	}
+	return nil
 }
 
 func (b *batcher) spawn(fn func(chan interface{})) {
 	for e := range b.outbox {
+		t0 := time.Now()
 		fn(e)
+		ln.Info(ln.F{"measure#batcher.worker.time": time.Since(t0)})
 	}
 }
 
@@ -91,46 +143,23 @@ func (b *batcher) startWorkers(fn func(chan interface{})) {
 
 func (b *batcher) Trigger(fn func(chan interface{})) {
 	b.startWorkers(fn)
-
-	buff := make(chan interface{}, b.count)
-	for {
-		select {
-		case item := <-b.list:
-			// Happy path.
-			b.bufferMaybeBatch(&buff, item)
-
-		case <-time.After(b.interval):
-			// Flush if we have anything, otherwise, we
-			// start all over again with the timer reset.
-			if len(buff) > 0 {
-				b.batch(&buff)
-			}
-
-		case <-b.closer:
-			// Ensure range terminates
-			close(b.list)
-
-			// Flush any other bits we might still have.
-			for item := range b.list {
-				b.bufferMaybeBatch(&buff, item)
-			}
-			b.batch(&buff)
-
-			// Make sure workers' ranges terminate
-			close(b.outbox)
-			return
-		}
-	}
 }
 
 func (b *batcher) Close() error {
+	close(b.list)
+	if len(b.list) > 0 {
+		b.outbox <- b.list
+		b.list = nil
+	}
 	close(b.closer)
+	close(b.outbox)
 
 	// Wait for all workers to finish.
 	b.wg.Wait()
 	return nil
 }
 
+/*
 func (b *batcher) bufferMaybeBatch(buff *chan interface{}, item interface{}) {
 	select {
 	case *buff <- item:
@@ -145,3 +174,4 @@ func (b *batcher) batch(buff *chan interface{}) {
 	b.outbox <- *buff
 	*buff = make(chan interface{}, b.count)
 }
+*/
