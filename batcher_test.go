@@ -18,7 +18,7 @@ type myConcreteType struct {
 func TestQueueTriggerBasics(t *testing.T) {
 	// Obscenely long time. We want the batch by number
 	// in this test.
-	b := New(5, time.Second*1500)
+	b := New(5, Interval(time.Second*1500))
 	defer b.Close()
 
 	// Use channels to signal completion
@@ -57,7 +57,7 @@ func TestQueueTriggerBasics(t *testing.T) {
 func TestQueueTriggerTimedFlush(t *testing.T) {
 	// We want enough time to get a batch,
 	// but fast enough that the test won't block long.
-	b := New(5, time.Millisecond*10)
+	b := New(5, Interval(time.Millisecond*10))
 	defer b.Close()
 
 	// Use channels to signal completion
@@ -82,7 +82,7 @@ func TestQueueTriggerTimedFlush(t *testing.T) {
 
 func TestQueueTriggerCloseFlush(t *testing.T) {
 	// We want the flush to be triggered by `Close()`.
-	b := New(5, time.Second*1500)
+	b := New(5, Interval(time.Second*1500))
 
 	// Use channels to signal completion
 	done := make(chan chan interface{}, 2)
@@ -107,7 +107,7 @@ func TestQueueTriggerCloseFlush(t *testing.T) {
 
 func TestQueueAfterClosedDoesNotPanic(t *testing.T) {
 	// We want the flush to be triggered by `Close()`.
-	b := New(5, time.Second*1500)
+	b := New(5, Interval(time.Second*1500))
 
 	// Use channels to signal completion
 	done := make(chan chan interface{}, 2)
@@ -118,21 +118,22 @@ func TestQueueAfterClosedDoesNotPanic(t *testing.T) {
 	// Queue a single hypothetical concrete type
 	b.Queue(myConcreteType{Name: "John"})
 	b.Close()
+
 	if err := b.Queue(myConcreteType{Name: "John"}); err != errClosed {
 		t.Fatalf("Expected err to be errClosed, got %s", err)
 	}
 }
 
 func TestOverflowing(t *testing.T) {
-	QueueSize = 5
+	N := 5
 
 	// We want the flush to be triggered by the buffer size.
-	b := New(1, time.Second*1500)
+	b := New(1, Interval(time.Second*1500), OutboxSize(N))
 	defer b.Close()
 
 	// Use channels to signal completion
 	done := make(chan bool, 100)
-	result := make(chan interface{}, QueueSize)
+	result := make(chan interface{}, N)
 
 	go b.Trigger(func(payload chan interface{}) {
 		for e := range payload {
@@ -146,7 +147,7 @@ func TestOverflowing(t *testing.T) {
 
 	// Queue 1 more to trigger the overflow
 	// Queue 1 additional more for result ch overflow
-	for i := 0; i < QueueSize+2; i++ {
+	for i := 0; i < N+2; i++ {
 		// Queue a hypothetical concrete type
 		if err := b.Queue(myConcreteType{Name: fmt.Sprintf("John %d", i)}); err != nil {
 			t.Fatal(err)
@@ -155,8 +156,8 @@ func TestOverflowing(t *testing.T) {
 
 	select {
 	case <-done:
-		if len(result) != QueueSize {
-			t.Fatalf("Expected result len to be %d but got %d", QueueSize, len(result))
+		if len(result) != N {
+			t.Fatalf("Expected result len to be %d but got %d", N, len(result))
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Too slow")
@@ -167,7 +168,7 @@ func BenchmarkQueueWithNoop(b *testing.B) {
 	b.StartTimer()
 
 	// Obscenely long timeout so it won't trigger at all.
-	batching := New(1500, time.Second*1500)
+	batching := New(1500, Interval(time.Second*1500))
 
 	// Add up all the payload lengths that we get to verify
 	// that input <=> output counts are the same.
@@ -184,34 +185,18 @@ func BenchmarkQueueWithNoop(b *testing.B) {
 		}
 	}
 
-	b.StopTimer()
 	batching.Close()
+	b.StopTimer()
 
 	// Basically we should be getting the same values here.
 	fmt.Printf("Scheduled %d ops, Completed = %d\n", b.N, ops)
 }
 
 func BenchmarkQueueWithSlowOperation(b *testing.B) {
-	// Increase worker size to determine what mathemetical
-	// balance we need.
-	// Currently 10 is the minimum number of workes which
-	// doesn't drop an item for this setup meaning:
-	//
-	//    5 workers x 1500 elements taking 1ms each
-	//    => 7500 elements taking 1ms
-	//    => 2M elements / 7500 elems/1ms == 266.67 elem/ms throughput max
-	//
-	//    10 workers just means 133.33 elem/ms which is what satisifies
-	//    this bandwidth condition.
-	Workers = 10
-	defer func() {
-		Workers = 5
-	}()
-
 	b.StartTimer()
 
 	// Obscenely long timeout so it won't trigger at all.
-	batching := New(1500, time.Second*1500)
+	batching := New(1500, Interval(time.Second*1500), NumWorkers(10))
 
 	// Add up all the payload lengths that we get to verify
 	// that input <=> output counts are the same.
@@ -229,8 +214,8 @@ func BenchmarkQueueWithSlowOperation(b *testing.B) {
 		}
 	}
 
-	b.StopTimer()
 	batching.Close()
+	b.StopTimer()
 
 	// Basically we should be getting the same values here.
 	fmt.Printf("Scheduled %d ops, Completed = %d\n", b.N, ops)
